@@ -20,14 +20,26 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.docent_utils import DocentCollectionTarget, build_docent_agent_run_payload
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 class TestRolloutCollection:
+    def test_docent_logging_args_are_mutually_exclusive(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            RolloutCollectionConfig(
+                agent_name="my_agent",
+                input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+                output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+                docent_log_to_new_collection="new",
+                docent_log_to_existing_collection="existing",
+            )
+
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
         prompt_path = tmp_path / "prompt.yaml"
@@ -410,6 +422,243 @@ class TestRolloutCollection:
         )
 
         assert expected_results == actual_returned_results
+
+    def test_build_docent_agent_run_payload_with_transitions(self, tmp_path: Path) -> None:
+        result = {
+            "_ng_task_index": 3,
+            "_ng_rollout_index": 2,
+            "agent_ref": {"name": "my_agent"},
+            "responses_create_params": {
+                "input": [{"role": "user", "content": "Solve this problem."}],
+            },
+            "response": {
+                "model": "test-model",
+                "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+                "output": [
+                    [
+                        {"role": "user", "type": "message", "content": "Solve this problem."},
+                        {
+                            "type": "function_call",
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"2+2\"}",
+                        },
+                    ],
+                    [
+                        {"role": "user", "type": "message", "content": "Solve this problem."},
+                        {
+                            "type": "function_call",
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"2+2\"}",
+                        },
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call_1",
+                            "output": "4",
+                        },
+                        {
+                            "role": "assistant",
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "The answer is 4."}],
+                        },
+                    ],
+                ],
+            },
+            "reward": 1.0,
+        }
+
+        payload = build_docent_agent_run_payload(result=result, output_fpath=tmp_path / "rollouts.jsonl")
+
+        assert payload["name"] == "my_agent/task-3/rollout-2"
+        assert payload["messages"] == [
+            {"role": "user", "content": "Solve this problem."},
+            {"role": "assistant", "content": '[tool call] calculator({"expr": "2+2"})'},
+            {"role": "assistant", "content": "[tool result call_1] 4"},
+            {"role": "assistant", "content": "The answer is 4."},
+        ]
+        assert payload["metadata"]["scores"] == {
+            "reward": 1.0,
+            "total_tokens": 30,
+            "input_tokens": 10,
+            "output_tokens": 20,
+        }
+        assert payload["metadata"]["nemo_gym"]["raw_rollout"] == result
+
+    async def test_run_from_config_docent_requires_api_key(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.delenv("DOCENT_API_KEY", raising=False)
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}}) + "\n"
+        )
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            docent_log_to_existing_collection="collection-123",
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                raise AssertionError("run_examples should not be reached when Docent config is invalid")
+
+        with pytest.raises(ValueError, match="DOCENT_API_KEY"):
+            await TestRolloutCollectionHelper().run_from_config(config)
+
+    async def test_run_from_config_uploads_to_docent_new_collection(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(3)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            num_repeats=2,
+            docent_log_to_new_collection="",
+        )
+
+        init_calls = []
+        upload_calls = []
+
+        def fake_initialize(**kwargs):
+            init_calls.append(kwargs)
+            return DocentCollectionTarget(
+                client=object(),
+                collection_id="new-collection",
+                collection_name="generated-name",
+                is_new_collection=True,
+            )
+
+        def fake_upload(**kwargs):
+            upload_calls.append(kwargs)
+            return len(kwargs["results"])
+
+        monkeypatch.setattr(
+            "nemo_gym.docent_utils.initialize_docent_collection_target",
+            fake_initialize,
+        )
+        monkeypatch.setattr(
+            "nemo_gym.docent_utils.upload_rollouts_to_docent_collection",
+            fake_upload,
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        actual_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        assert len(actual_results) == 6
+        assert len(init_calls) == 1
+        assert init_calls[0]["log_to_new_collection"] == ""
+        assert len(upload_calls) == 1
+        assert upload_calls[0]["collection_target"].collection_id == "new-collection"
+        assert len(upload_calls[0]["results"]) == 6
+
+    async def test_run_from_config_docent_existing_collection_skips_cached_results(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        materialized_inputs = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": []},
+                "agent_ref": {"name": "my agent"},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": []},
+                "agent_ref": {"name": "my agent"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": []},
+                "agent_ref": {"name": "my agent"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": []},
+                "agent_ref": {"name": "my agent"},
+            },
+        ]
+        materialized_inputs_jsonl_fpath = tmp_path / "output_materialized_inputs.jsonl"
+        materialized_inputs_jsonl_fpath.write_bytes(
+            b"\n".join(map(orjson.dumps, materialized_inputs)) + b"\n"
+        )
+
+        cached_outputs = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": []},
+                "response": {"usage": {"tokens": 10}},
+                "agent_ref": {"name": "my agent"},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": []},
+                "response": {"usage": {"tokens": 11}},
+                "agent_ref": {"name": "my agent"},
+            },
+        ]
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        output_jsonl_fpath.write_bytes(b"\n".join(map(orjson.dumps, cached_outputs)) + b"\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+            docent_log_to_existing_collection="existing-collection",
+        )
+
+        upload_calls = []
+
+        monkeypatch.setattr(
+            "nemo_gym.docent_utils.initialize_docent_collection_target",
+            lambda **kwargs: DocentCollectionTarget(
+                client=object(),
+                collection_id="existing-collection",
+                collection_name=None,
+                is_new_collection=False,
+            ),
+        )
+        monkeypatch.setattr(
+            "nemo_gym.docent_utils.upload_rollouts_to_docent_collection",
+            lambda **kwargs: upload_calls.append(kwargs) or len(kwargs["results"]),
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"response": {"usage": {"tokens": 99}}}))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        actual_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        assert len(actual_results) == 4
+        assert len(upload_calls) == 1
+        assert len(upload_calls[0]["results"]) == 2
 
     async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""

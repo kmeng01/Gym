@@ -192,6 +192,11 @@ dependencies = [
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
     "wandb",
 
+    # Docent SDK: Used to create collections and upload collected rollouts as agent runs.
+    # Updated: Mon Apr 20, 2026 with docent-python==0.1.61a0
+    # License: Apache 2.0 https://pypi.org/project/docent-python/
+    "docent-python>=0.1.61a0",
+
     # gprof2dot and pydot: Used for outputting dot graphs for profiling.
     # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
     # gprof2dot License: GNU Lesser General Public License v3.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE

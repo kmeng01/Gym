@@ -24,7 +24,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
@@ -125,11 +125,30 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
+    docent_log_to_new_collection: Optional[str] = Field(
+        default=None,
+        description="Create a new Docent collection and upload rollouts there. Pass an empty string to use a generated default collection name. Mutually exclusive with docent_log_to_existing_collection.",
+    )
+    docent_log_to_existing_collection: Optional[str] = Field(
+        default=None,
+        description="Upload rollouts to an existing Docent collection ID. Mutually exclusive with docent_log_to_new_collection.",
+    )
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
         output_fpath = Path(self.output_jsonl_fpath)
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
+    @model_validator(mode="after")
+    def validate_docent_logging_args(self) -> "RolloutCollectionConfig":
+        if (
+            self.docent_log_to_new_collection is not None
+            and self.docent_log_to_existing_collection is not None
+        ):
+            raise ValueError(
+                "docent_log_to_new_collection and docent_log_to_existing_collection are mutually exclusive."
+            )
+        return self
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -244,6 +263,25 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        docent_collection_target = None
+        if (
+            config.docent_log_to_new_collection is not None
+            or config.docent_log_to_existing_collection is not None
+        ):
+            from nemo_gym.docent_utils import initialize_docent_collection_target
+
+            docent_collection_target = initialize_docent_collection_target(
+                output_fpath=output_fpath,
+                log_to_new_collection=config.docent_log_to_new_collection,
+                log_to_existing_collection=config.docent_log_to_existing_collection,
+            )
+            if docent_collection_target.is_new_collection:
+                print(
+                    f"Created Docent collection `{docent_collection_target.collection_name}` "
+                    f"({docent_collection_target.collection_id})"
+                )
+            else:
+                print(f"Using existing Docent collection {docent_collection_target.collection_id}")
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
@@ -275,6 +313,8 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+
+        initial_result_count = len(results)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -319,6 +359,24 @@ class RolloutCollectionHelper(BaseModel):
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
+
+        if docent_collection_target is not None:
+            from nemo_gym.docent_utils import upload_rollouts_to_docent_collection
+
+            results_to_upload = results
+            if config.resume_from_cache and not docent_collection_target.is_new_collection:
+                results_to_upload = results[initial_result_count:]
+
+            print(
+                f"Uploading {len(results_to_upload)} rollouts to Docent collection "
+                f"{docent_collection_target.collection_id}"
+            )
+            uploaded_count = upload_rollouts_to_docent_collection(
+                collection_target=docent_collection_target,
+                results=results_to_upload,
+                output_fpath=output_fpath,
+            )
+            print(f"Uploaded {uploaded_count} rollouts to Docent")
         del result_strs
 
         print("Sorting results to ensure consistent ordering")
