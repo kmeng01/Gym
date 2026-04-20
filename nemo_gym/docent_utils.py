@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 
 DEFAULT_DOCENT_COLLECTION_PREFIX = "NeMo Gym rollouts"
+DOCENT_DEPENDENCY_ERROR = "Docent logging requires the optional `nemo-gym[docent]` dependency extra."
 
 
 @dataclass
@@ -20,20 +21,53 @@ class DocentCollectionTarget:
     is_new_collection: bool
 
 
+def validate_docent_logging_requirements() -> None:
+    _get_docent_api_key()
+    _get_docent_client_class()
+    _get_docent_upload_classes()
+
+
+def log_rollouts_to_docent(
+    *,
+    output_fpath: Path,
+    log_to_new_collection: Optional[str],
+    log_to_existing_collection: Optional[str],
+    results: list[dict[str, Any]],
+    resume_from_cache: bool,
+    initial_result_count: int,
+) -> int:
+    collection_target = initialize_docent_collection_target(
+        output_fpath=output_fpath,
+        log_to_new_collection=log_to_new_collection,
+        log_to_existing_collection=log_to_existing_collection,
+    )
+    if collection_target.is_new_collection:
+        print(f"Created Docent collection `{collection_target.collection_name}` ({collection_target.collection_id})")
+    else:
+        print(f"Using existing Docent collection {collection_target.collection_id}")
+
+    results_to_upload = results
+    if resume_from_cache and not collection_target.is_new_collection:
+        results_to_upload = results[initial_result_count:]
+
+    print(f"Uploading {len(results_to_upload)} rollouts to Docent collection {collection_target.collection_id}")
+    uploaded_count = upload_rollouts_to_docent_collection(
+        collection_target=collection_target,
+        results=results_to_upload,
+        output_fpath=output_fpath,
+    )
+    print(f"Uploaded {uploaded_count} rollouts to Docent")
+    return uploaded_count
+
+
 def initialize_docent_collection_target(
     *,
     output_fpath: Path,
     log_to_new_collection: Optional[str],
     log_to_existing_collection: Optional[str],
 ) -> DocentCollectionTarget:
-    api_key = os.getenv("DOCENT_API_KEY")
-    if not api_key:
-        raise ValueError("Docent logging requires DOCENT_API_KEY to be set in the environment.")
-
-    try:
-        from docent import Docent
-    except ImportError as exc:  # pragma: no cover - exercised via tests with monkeypatching
-        raise ImportError("Docent logging requires the optional `nemo-gym[docent]` dependency extra.") from exc
+    api_key = _get_docent_api_key()
+    Docent = _get_docent_client_class()
 
     client = Docent(api_key=api_key)
 
@@ -73,11 +107,7 @@ def upload_rollouts_to_docent_collection(
     if not results:
         return 0
 
-    try:
-        from docent.data_models import AgentRun, Transcript
-        from docent.data_models.chat import AssistantMessage, UserMessage
-    except ImportError as exc:  # pragma: no cover - exercised via tests with monkeypatching
-        raise ImportError("Docent logging requires the optional `nemo-gym[docent]` dependency extra.") from exc
+    AgentRun, Transcript, UserMessage, AssistantMessage = _get_docent_upload_classes()
 
     agent_runs = []
     for result in results:
@@ -97,6 +127,38 @@ def upload_rollouts_to_docent_collection(
 
     collection_target.client.add_agent_runs(collection_target.collection_id, agent_runs)
     return len(agent_runs)
+
+
+def is_docent_logging_requested(
+    *,
+    log_to_new_collection: Optional[str],
+    log_to_existing_collection: Optional[str],
+) -> bool:
+    return log_to_new_collection is not None or log_to_existing_collection is not None
+
+
+def _get_docent_api_key() -> str:
+    api_key = os.getenv("DOCENT_API_KEY")
+    if not api_key:
+        raise ValueError("Docent logging requires DOCENT_API_KEY to be set in the environment.")
+    return api_key
+
+
+def _get_docent_client_class() -> Any:
+    try:
+        from docent import Docent
+    except ImportError as exc:  # pragma: no cover - exercised via tests with monkeypatching
+        raise ImportError(DOCENT_DEPENDENCY_ERROR) from exc
+    return Docent
+
+
+def _get_docent_upload_classes() -> tuple[Any, Any, Any, Any]:
+    try:
+        from docent.data_models import AgentRun, Transcript
+        from docent.data_models.chat import AssistantMessage, UserMessage
+    except ImportError as exc:  # pragma: no cover - exercised via tests with monkeypatching
+        raise ImportError(DOCENT_DEPENDENCY_ERROR) from exc
+    return AgentRun, Transcript, UserMessage, AssistantMessage
 
 
 def build_docent_agent_run_payload(*, result: dict[str, Any], output_fpath: Path) -> dict[str, Any]:
@@ -172,7 +234,7 @@ def _build_docent_messages(result: dict[str, Any]) -> list[dict[str, str]]:
     if _response_contains_transitions(response):
         messages.extend(_messages_from_output_payload(response))
     else:
-        input_payload = ((result.get("responses_create_params") or {}).get("input"))
+        input_payload = (result.get("responses_create_params") or {}).get("input")
         messages.extend(_messages_from_input_payload(input_payload))
         messages.extend(_messages_from_output_payload(response))
 

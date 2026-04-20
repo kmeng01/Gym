@@ -31,6 +31,11 @@ from wandb import Table
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
+from nemo_gym.docent_utils import (
+    is_docent_logging_requested,
+    log_rollouts_to_docent,
+    validate_docent_logging_requirements,
+)
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
@@ -141,10 +146,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @model_validator(mode="after")
     def validate_docent_logging_args(self) -> "RolloutCollectionConfig":
-        if (
-            self.docent_log_to_new_collection is not None
-            and self.docent_log_to_existing_collection is not None
-        ):
+        if self.docent_log_to_new_collection is not None and self.docent_log_to_existing_collection is not None:
             raise ValueError(
                 "docent_log_to_new_collection and docent_log_to_existing_collection are mutually exclusive."
             )
@@ -263,25 +265,11 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
-        docent_collection_target = None
-        if (
-            config.docent_log_to_new_collection is not None
-            or config.docent_log_to_existing_collection is not None
+        if is_docent_logging_requested(
+            log_to_new_collection=config.docent_log_to_new_collection,
+            log_to_existing_collection=config.docent_log_to_existing_collection,
         ):
-            from nemo_gym.docent_utils import initialize_docent_collection_target
-
-            docent_collection_target = initialize_docent_collection_target(
-                output_fpath=output_fpath,
-                log_to_new_collection=config.docent_log_to_new_collection,
-                log_to_existing_collection=config.docent_log_to_existing_collection,
-            )
-            if docent_collection_target.is_new_collection:
-                print(
-                    f"Created Docent collection `{docent_collection_target.collection_name}` "
-                    f"({docent_collection_target.collection_id})"
-                )
-            else:
-                print(f"Using existing Docent collection {docent_collection_target.collection_id}")
+            validate_docent_logging_requirements()
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
@@ -360,23 +348,18 @@ class RolloutCollectionHelper(BaseModel):
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
 
-        if docent_collection_target is not None:
-            from nemo_gym.docent_utils import upload_rollouts_to_docent_collection
-
-            results_to_upload = results
-            if config.resume_from_cache and not docent_collection_target.is_new_collection:
-                results_to_upload = results[initial_result_count:]
-
-            print(
-                f"Uploading {len(results_to_upload)} rollouts to Docent collection "
-                f"{docent_collection_target.collection_id}"
-            )
-            uploaded_count = upload_rollouts_to_docent_collection(
-                collection_target=docent_collection_target,
-                results=results_to_upload,
+        if is_docent_logging_requested(
+            log_to_new_collection=config.docent_log_to_new_collection,
+            log_to_existing_collection=config.docent_log_to_existing_collection,
+        ):
+            log_rollouts_to_docent(
                 output_fpath=output_fpath,
+                log_to_new_collection=config.docent_log_to_new_collection,
+                log_to_existing_collection=config.docent_log_to_existing_collection,
+                results=results,
+                resume_from_cache=config.resume_from_cache,
+                initial_result_count=initial_result_count,
             )
-            print(f"Uploaded {uploaded_count} rollouts to Docent")
         del result_strs
 
         print("Sorting results to ensure consistent ordering")
