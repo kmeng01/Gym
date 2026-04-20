@@ -33,7 +33,7 @@ def initialize_docent_collection_target(
     try:
         from docent import Docent
     except ImportError as exc:  # pragma: no cover - exercised via tests with monkeypatching
-        raise ImportError("Docent logging requires the `docent-python` package to be installed.") from exc
+        raise ImportError("Docent logging requires the optional `nemo-gym[docent]` dependency extra.") from exc
 
     client = Docent(api_key=api_key)
 
@@ -77,7 +77,7 @@ def upload_rollouts_to_docent_collection(
         from docent.data_models import AgentRun, Transcript
         from docent.data_models.chat import AssistantMessage, UserMessage
     except ImportError as exc:  # pragma: no cover - exercised via tests with monkeypatching
-        raise ImportError("Docent logging requires the `docent-python` package to be installed.") from exc
+        raise ImportError("Docent logging requires the optional `nemo-gym[docent]` dependency extra.") from exc
 
     agent_runs = []
     for result in results:

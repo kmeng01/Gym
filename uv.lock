@@ -2369,7 +2369,6 @@ dependencies = [
     { name = "aiohttp" },
     { name = "datasets" },
     { name = "devtools" },
-    { name = "docent-python" },
     { name = "fastapi" },
     { name = "fonttools" },
     { name = "gprof2dot" },
@@ -2407,6 +2406,9 @@ dev = [
     { name = "requests-mock" },
     { name = "ruff" },
 ]
+docent = [
+    { name = "docent-python" },
+]
 
 [package.dev-dependencies]
 docs = [
@@ -2428,7 +2430,7 @@ requires-dist = [
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'" },
     { name = "datasets" },
     { name = "devtools" },
-    { name = "docent-python", specifier = ">=0.1.61a0" },
+    { name = "docent-python", marker = "extra == 'docent'", specifier = ">=0.1.61a0" },
     { name = "fastapi" },
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gprof2dot" },
@@ -2461,7 +2463,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "yappi" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["docent", "dev"]
 
 [package.metadata.requires-dev]
 docs = [
@@ -4959,7 +4961,7 @@ name = "zipfile-zstd"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zstandard" },
+    { name = "zstandard", marker = "python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f7/2a/2e0941bc0058d10ab37d8c578b94a19f611f6ae54f124140f2fb451f0932/zipfile-zstd-0.0.4.tar.gz", hash = "sha256:c1498e15b7922a3d1af0ea55df8b11b2af4e8f7e0e80e414e25d66899f7def89", size = 4603, upload-time = "2021-12-08T07:38:16.245Z" }
 wheels = [
