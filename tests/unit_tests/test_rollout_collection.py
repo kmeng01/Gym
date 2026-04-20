@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.docent_utils import (
     DocentCollectionTarget,
-    build_docent_agent_run_payload,
+    _build_docent_agent_run_payload,
     is_docent_logging_requested,
     log_rollouts_to_docent,
     validate_docent_logging_requirements,
@@ -472,7 +472,7 @@ class TestRolloutCollection:
             "reward": 1.0,
         }
 
-        payload = build_docent_agent_run_payload(result=result, output_fpath=tmp_path / "rollouts.jsonl")
+        payload = _build_docent_agent_run_payload(result=result, output_fpath=tmp_path / "rollouts.jsonl")
 
         assert payload["name"] == "my_agent/task-3/rollout-2"
         assert payload["messages"] == [
@@ -544,11 +544,11 @@ class TestRolloutCollection:
         docent_calls = []
 
         monkeypatch.setattr(
-            "nemo_gym.docent_utils.validate_docent_logging_requirements",
+            "nemo_gym.rollout_collection.validate_docent_logging_requirements",
             lambda: validate_calls.append(True),
         )
         monkeypatch.setattr(
-            "nemo_gym.docent_utils.log_rollouts_to_docent",
+            "nemo_gym.rollout_collection.log_rollouts_to_docent",
             lambda **kwargs: docent_calls.append(kwargs) or len(kwargs["results"]),
         )
 
@@ -636,11 +636,11 @@ class TestRolloutCollection:
         docent_calls = []
 
         monkeypatch.setattr(
-            "nemo_gym.docent_utils.validate_docent_logging_requirements",
+            "nemo_gym.rollout_collection.validate_docent_logging_requirements",
             lambda: validate_calls.append(True),
         )
         monkeypatch.setattr(
-            "nemo_gym.docent_utils.log_rollouts_to_docent",
+            "nemo_gym.rollout_collection.log_rollouts_to_docent",
             lambda **kwargs: docent_calls.append(kwargs) or len(kwargs["results"]),
         )
 
@@ -702,7 +702,7 @@ class TestRolloutCollection:
         upload_calls = []
 
         monkeypatch.setattr(
-            "nemo_gym.docent_utils.initialize_docent_collection_target",
+            "nemo_gym.docent_utils._initialize_docent_collection_target",
             lambda **kwargs: DocentCollectionTarget(
                 client=object(),
                 collection_id="existing-collection",
@@ -711,7 +711,7 @@ class TestRolloutCollection:
             ),
         )
         monkeypatch.setattr(
-            "nemo_gym.docent_utils.upload_rollouts_to_docent_collection",
+            "nemo_gym.docent_utils._upload_rollouts_to_docent_collection",
             lambda **kwargs: upload_calls.append(kwargs) or len(kwargs["results"]),
         )
 

@@ -22,6 +22,7 @@ class DocentCollectionTarget:
 
 
 def validate_docent_logging_requirements() -> None:
+    """Fail fast if Docent logging was requested but its runtime requirements are missing."""
     _get_docent_api_key()
     _get_docent_client_class()
     _get_docent_upload_classes()
@@ -36,7 +37,21 @@ def log_rollouts_to_docent(
     resume_from_cache: bool,
     initial_result_count: int,
 ) -> int:
-    collection_target = initialize_docent_collection_target(
+    """Upload rollouts to a Docent collection.
+
+    When a rollout run resumes from cache, ``results`` contains both:
+    - cached rollouts loaded before new work started, and
+    - new rollouts collected during the current invocation.
+
+    ``initial_result_count`` records how many entries were already present in
+    ``results`` before new rollouts were appended. That count is only used when
+    logging to an existing Docent collection while ``resume_from_cache=True``:
+    in that case we upload only ``results[initial_result_count:]`` so cached
+    rollouts are not uploaded twice. When logging to a new collection, all
+    results are uploaded even if the run resumed from cache, because the new
+    collection starts empty.
+    """
+    collection_target = _initialize_docent_collection_target(
         output_fpath=output_fpath,
         log_to_new_collection=log_to_new_collection,
         log_to_existing_collection=log_to_existing_collection,
@@ -48,10 +63,12 @@ def log_rollouts_to_docent(
 
     results_to_upload = results
     if resume_from_cache and not collection_target.is_new_collection:
+        # ``results`` begins with cached rollouts that are already present in the
+        # existing Docent collection, so only upload the newly appended suffix.
         results_to_upload = results[initial_result_count:]
 
     print(f"Uploading {len(results_to_upload)} rollouts to Docent collection {collection_target.collection_id}")
-    uploaded_count = upload_rollouts_to_docent_collection(
+    uploaded_count = _upload_rollouts_to_docent_collection(
         collection_target=collection_target,
         results=results_to_upload,
         output_fpath=output_fpath,
@@ -60,7 +77,7 @@ def log_rollouts_to_docent(
     return uploaded_count
 
 
-def initialize_docent_collection_target(
+def _initialize_docent_collection_target(
     *,
     output_fpath: Path,
     log_to_new_collection: Optional[str],
@@ -98,7 +115,7 @@ def initialize_docent_collection_target(
     )
 
 
-def upload_rollouts_to_docent_collection(
+def _upload_rollouts_to_docent_collection(
     *,
     collection_target: DocentCollectionTarget,
     results: list[dict[str, Any]],
@@ -111,7 +128,7 @@ def upload_rollouts_to_docent_collection(
 
     agent_runs = []
     for result in results:
-        payload = build_docent_agent_run_payload(result=result, output_fpath=output_fpath)
+        payload = _build_docent_agent_run_payload(result=result, output_fpath=output_fpath)
         transcript = Transcript(
             messages=[_build_docent_message(msg, UserMessage, AssistantMessage) for msg in payload["messages"]]
         )
@@ -134,6 +151,7 @@ def is_docent_logging_requested(
     log_to_new_collection: Optional[str],
     log_to_existing_collection: Optional[str],
 ) -> bool:
+    """Return whether rollout collection should initialize Docent logging at all."""
     return log_to_new_collection is not None or log_to_existing_collection is not None
 
 
@@ -161,7 +179,7 @@ def _get_docent_upload_classes() -> tuple[Any, Any, Any, Any]:
     return AgentRun, Transcript, UserMessage, AssistantMessage
 
 
-def build_docent_agent_run_payload(*, result: dict[str, Any], output_fpath: Path) -> dict[str, Any]:
+def _build_docent_agent_run_payload(*, result: dict[str, Any], output_fpath: Path) -> dict[str, Any]:
     agent_name = ((result.get("agent_ref") or {}).get("name")) or "unknown-agent"
     task_index = result.get("_ng_task_index")
     rollout_index = result.get("_ng_rollout_index")
