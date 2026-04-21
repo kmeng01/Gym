@@ -24,13 +24,18 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
+from nemo_gym.docent_utils import (
+    is_docent_logging_requested,
+    log_rollouts_to_docent,
+    validate_docent_logging_requirements,
+)
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
@@ -125,11 +130,27 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
+    docent_log_to_new_collection: Optional[str] = Field(
+        default=None,
+        description="Create a new Docent collection and upload rollouts there. Pass an empty string to use a generated default collection name. Mutually exclusive with docent_log_to_existing_collection.",
+    )
+    docent_log_to_existing_collection: Optional[str] = Field(
+        default=None,
+        description="Upload rollouts to an existing Docent collection ID. Mutually exclusive with docent_log_to_new_collection.",
+    )
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
         output_fpath = Path(self.output_jsonl_fpath)
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
+    @model_validator(mode="after")
+    def validate_docent_logging_args(self) -> "RolloutCollectionConfig":
+        if self.docent_log_to_new_collection is not None and self.docent_log_to_existing_collection is not None:
+            raise ValueError(
+                "docent_log_to_new_collection and docent_log_to_existing_collection are mutually exclusive."
+            )
+        return self
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -244,6 +265,11 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        if is_docent_logging_requested(
+            log_to_new_collection=config.docent_log_to_new_collection,
+            log_to_existing_collection=config.docent_log_to_existing_collection,
+        ):
+            validate_docent_logging_requirements()
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
@@ -275,6 +301,8 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+
+        initial_result_count = len(results)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -319,6 +347,19 @@ class RolloutCollectionHelper(BaseModel):
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
+
+        if is_docent_logging_requested(
+            log_to_new_collection=config.docent_log_to_new_collection,
+            log_to_existing_collection=config.docent_log_to_existing_collection,
+        ):
+            log_rollouts_to_docent(
+                output_fpath=output_fpath,
+                log_to_new_collection=config.docent_log_to_new_collection,
+                log_to_existing_collection=config.docent_log_to_existing_collection,
+                results=results,
+                resume_from_cache=config.resume_from_cache,
+                initial_result_count=initial_result_count,
+            )
         del result_strs
 
         print("Sorting results to ensure consistent ordering")

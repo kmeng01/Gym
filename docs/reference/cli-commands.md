@@ -174,6 +174,12 @@ Perform a batch of rollout collection.
 * - `responses_create_params`
   - Dict
   - Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`.
+* - `docent_log_to_new_collection`
+  - Optional[str]
+  - Create a new Docent collection and upload all collected rollouts there. Pass an empty string to use a generated default collection name. Mutually exclusive with `docent_log_to_existing_collection`. Requires `DOCENT_API_KEY` in the environment and the optional `nemo-gym[docent]` dependency extra.
+* - `docent_log_to_existing_collection`
+  - Optional[str]
+  - Upload collected rollouts to an existing Docent collection ID. Mutually exclusive with `docent_log_to_new_collection`. Requires `DOCENT_API_KEY` in the environment and the optional `nemo-gym[docent]` dependency extra.
 ```
 
 **Example**
