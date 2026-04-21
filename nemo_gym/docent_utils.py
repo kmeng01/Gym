@@ -21,6 +21,13 @@ class DocentCollectionTarget:
     is_new_collection: bool
 
 
+@dataclass
+class DocentLoggingStats:
+    attempted_rollouts: int = 0
+    skipped_rollouts: int = 0
+    uploaded_rollouts: int = 0
+
+
 def validate_docent_logging_requirements() -> None:
     """Fail fast if Docent logging was requested but its runtime requirements are missing."""
     _get_docent_api_key()
@@ -36,7 +43,7 @@ def log_rollouts_to_docent(
     results: list[dict[str, Any]],
     resume_from_cache: bool,
     initial_result_count: int,
-) -> int:
+) -> DocentLoggingStats:
     """Upload rollouts to a Docent collection.
 
     When a rollout run resumes from cache, ``results`` contains both:
@@ -51,29 +58,90 @@ def log_rollouts_to_docent(
     results are uploaded even if the run resumed from cache, because the new
     collection starts empty.
     """
-    collection_target = _initialize_docent_collection_target(
-        output_fpath=output_fpath,
-        log_to_new_collection=log_to_new_collection,
-        log_to_existing_collection=log_to_existing_collection,
-    )
+    results_to_upload = results
+    if resume_from_cache and log_to_existing_collection is not None:
+        # ``results`` begins with cached rollouts that are already present in the
+        # existing Docent collection, so only upload the newly appended suffix.
+        results_to_upload = results[initial_result_count:]
+
+    stats = DocentLoggingStats(attempted_rollouts=len(results_to_upload))
+
+    try:
+        collection_target = _initialize_docent_collection_target(
+            output_fpath=output_fpath,
+            log_to_new_collection=log_to_new_collection,
+            log_to_existing_collection=log_to_existing_collection,
+        )
+    except Exception as exc:
+        print(f"Warning: failed to initialize Docent logging: {exc}")
+        _print_docent_logging_summary(stats)
+        return stats
+
     if collection_target.is_new_collection:
         print(f"Created Docent collection `{collection_target.collection_name}` ({collection_target.collection_id})")
     else:
         print(f"Using existing Docent collection {collection_target.collection_id}")
 
-    results_to_upload = results
-    if resume_from_cache and not collection_target.is_new_collection:
-        # ``results`` begins with cached rollouts that are already present in the
-        # existing Docent collection, so only upload the newly appended suffix.
-        results_to_upload = results[initial_result_count:]
+    print(f"Preparing {len(results_to_upload)} rollouts for Docent collection {collection_target.collection_id}")
+    agent_runs, skipped_conversion_rollouts = _build_docent_agent_runs(results=results_to_upload)
+    stats.skipped_rollouts = skipped_conversion_rollouts
 
-    print(f"Uploading {len(results_to_upload)} rollouts to Docent collection {collection_target.collection_id}")
-    uploaded_count = _upload_rollouts_to_docent_collection(
-        collection_target=collection_target,
-        results=results_to_upload,
-    )
+    if not agent_runs:
+        print(
+            f"Skipping Docent upload because no rollouts were converted successfully for {collection_target.collection_id}"
+        )
+        _print_docent_logging_summary(stats)
+        return stats
+
+    print(f"Uploading {len(agent_runs)} rollouts to Docent collection {collection_target.collection_id}")
+    try:
+        uploaded_count = _upload_rollouts_to_docent_collection(
+            collection_target=collection_target,
+            agent_runs=agent_runs,
+        )
+    except Exception as exc:
+        print(f"Warning: failed to upload rollouts to Docent collection {collection_target.collection_id}: {exc}")
+        _print_docent_logging_summary(stats)
+        return stats
+
+    stats.uploaded_rollouts = uploaded_count
     print(f"Uploaded {uploaded_count} rollouts to Docent")
-    return uploaded_count
+    _print_docent_logging_summary(stats)
+    return stats
+
+
+def _build_docent_agent_runs(
+    *,
+    results: list[dict[str, Any]],
+) -> tuple[list[Any], int]:
+    agent_runs: list[Any] = []
+    skipped_conversion_rollouts = 0
+
+    for result in results:
+        try:
+            agent_runs.append(_build_docent_agent_run(result=result))
+        except Exception as exc:
+            skipped_conversion_rollouts += 1
+            task_index = result.get("_ng_task_index", "?")
+            rollout_index = result.get("_ng_rollout_index", "?")
+            agent_name = (result.get("agent_ref") or {}).get("name", "?")
+            print(
+                "Warning: failed to convert rollout "
+                f"task={task_index}, rollout={rollout_index}, agent={agent_name} "
+                f"for Docent upload: {exc}"
+            )
+
+    return agent_runs, skipped_conversion_rollouts
+
+
+def _print_docent_logging_summary(stats: DocentLoggingStats) -> None:
+    summary_parts = [
+        f"attempted={stats.attempted_rollouts}",
+        f"skipped={stats.skipped_rollouts}",
+        f"uploaded={stats.uploaded_rollouts}",
+    ]
+
+    print("Docent logging summary: " + ", ".join(summary_parts))
 
 
 def _initialize_docent_collection_target(
@@ -97,7 +165,9 @@ def _initialize_docent_collection_target(
             is_new_collection=False,
         )
 
-    collection_name = log_to_new_collection or _default_collection_name(output_fpath)
+    collection_name = log_to_new_collection or (
+        f"{DEFAULT_DOCENT_COLLECTION_PREFIX} {output_fpath.stem} {datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
     collection_id = client.create_collection(
         name=collection_name,
         description=DOCENT_COLLECTION_DESCRIPTION,
@@ -117,12 +187,10 @@ def _initialize_docent_collection_target(
 def _upload_rollouts_to_docent_collection(
     *,
     collection_target: DocentCollectionTarget,
-    results: list[dict[str, Any]],
+    agent_runs: list[Any],
 ) -> int:
-    if not results:
+    if not agent_runs:
         return 0
-
-    agent_runs = [_build_docent_agent_run(result=result) for result in results]
 
     collection_target.client.add_agent_runs(collection_target.collection_id, agent_runs)
     return len(agent_runs)
@@ -181,7 +249,7 @@ def _normalize_rollout_for_docent_sdk(*, result: dict[str, Any]) -> dict[str, An
         return normalized_result
 
     output_items = response.get("output")
-    if _response_contains_transitions(response):
+    if bool(output_items) and all(isinstance(item, list) for item in output_items):
         final_snapshot = output_items[-1] if output_items else []
         response["output"] = deepcopy(final_snapshot)
 
@@ -195,13 +263,3 @@ def _normalize_rollout_for_docent_sdk(*, result: dict[str, Any]) -> dict[str, An
     if isinstance(output_items, list):
         response["output"] = deepcopy(output_items)
     return normalized_result
-
-
-def _default_collection_name(output_fpath: Path) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return f"{DEFAULT_DOCENT_COLLECTION_PREFIX} {output_fpath.stem} {timestamp}"
-
-
-def _response_contains_transitions(response: dict[str, Any]) -> bool:
-    output_items = response.get("output") or []
-    return bool(output_items) and all(isinstance(item, list) for item in output_items)

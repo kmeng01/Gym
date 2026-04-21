@@ -723,12 +723,13 @@ class TestRolloutCollection:
                 is_new_collection=False,
             ),
         )
+        monkeypatch.setattr("nemo_gym.docent_utils._build_docent_agent_run", lambda *, result: result)
         monkeypatch.setattr(
             "nemo_gym.docent_utils._upload_rollouts_to_docent_collection",
-            lambda **kwargs: upload_calls.append(kwargs) or len(kwargs["results"]),
+            lambda **kwargs: upload_calls.append(kwargs) or len(kwargs["agent_runs"]),
         )
 
-        uploaded_count = log_rollouts_to_docent(
+        stats = log_rollouts_to_docent(
             output_fpath=tmp_path / "output.jsonl",
             log_to_new_collection=None,
             log_to_existing_collection="existing-collection",
@@ -737,9 +738,169 @@ class TestRolloutCollection:
             initial_result_count=2,
         )
 
-        assert uploaded_count == 2
+        assert stats.attempted_rollouts == 2
+        assert stats.skipped_rollouts == 0
+        assert stats.uploaded_rollouts == 2
         assert len(upload_calls) == 1
-        assert upload_calls[0]["results"] == results[2:]
+        assert upload_calls[0]["agent_runs"] == results[2:]
+
+    def test_log_rollouts_to_docent_skips_malformed_rollouts(self, tmp_path: Path, monkeypatch) -> None:
+        results = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": []},
+                "response": {"usage": {"tokens": 10}},
+                "agent_ref": {"name": "my agent"},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": []},
+                "response": {"usage": {"tokens": 11}},
+                "agent_ref": {"name": "my agent"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": []},
+                "response": {"usage": {"tokens": 12}},
+                "agent_ref": {"name": "my agent"},
+            },
+        ]
+        upload_calls = []
+
+        monkeypatch.setattr(
+            "nemo_gym.docent_utils._initialize_docent_collection_target",
+            lambda **kwargs: DocentCollectionTarget(
+                client=object(),
+                collection_id="existing-collection",
+                collection_name=None,
+                is_new_collection=False,
+            ),
+        )
+
+        def mock_build_docent_agent_run(*, result):
+            if result["_ng_rollout_index"] == 1:
+                raise ValueError("malformed rollout")
+            return f"agent-run-{result['_ng_task_index']}-{result['_ng_rollout_index']}"
+
+        monkeypatch.setattr("nemo_gym.docent_utils._build_docent_agent_run", mock_build_docent_agent_run)
+        monkeypatch.setattr(
+            "nemo_gym.docent_utils._upload_rollouts_to_docent_collection",
+            lambda **kwargs: upload_calls.append(kwargs) or len(kwargs["agent_runs"]),
+        )
+
+        stats = log_rollouts_to_docent(
+            output_fpath=tmp_path / "output.jsonl",
+            log_to_new_collection=None,
+            log_to_existing_collection="existing-collection",
+            results=results,
+            resume_from_cache=False,
+            initial_result_count=0,
+        )
+
+        assert stats.attempted_rollouts == 3
+        assert stats.skipped_rollouts == 1
+        assert stats.uploaded_rollouts == 2
+        assert len(upload_calls) == 1
+        assert upload_calls[0]["agent_runs"] == ["agent-run-0-0", "agent-run-1-0"]
+
+    def test_log_rollouts_to_docent_upload_failure_is_nonfatal(self, tmp_path: Path, monkeypatch) -> None:
+        results = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": []},
+                "response": {"usage": {"tokens": 10}},
+                "agent_ref": {"name": "my agent"},
+            }
+        ]
+
+        monkeypatch.setattr(
+            "nemo_gym.docent_utils._initialize_docent_collection_target",
+            lambda **kwargs: DocentCollectionTarget(
+                client=object(),
+                collection_id="existing-collection",
+                collection_name=None,
+                is_new_collection=False,
+            ),
+        )
+        monkeypatch.setattr("nemo_gym.docent_utils._build_docent_agent_run", lambda *, result: "agent-run")
+
+        def raise_upload_error(**kwargs):
+            raise RuntimeError("Docent unavailable")
+
+        monkeypatch.setattr("nemo_gym.docent_utils._upload_rollouts_to_docent_collection", raise_upload_error)
+
+        stats = log_rollouts_to_docent(
+            output_fpath=tmp_path / "output.jsonl",
+            log_to_new_collection=None,
+            log_to_existing_collection="existing-collection",
+            results=results,
+            resume_from_cache=False,
+            initial_result_count=0,
+        )
+
+        assert stats.attempted_rollouts == 1
+        assert stats.skipped_rollouts == 0
+        assert stats.uploaded_rollouts == 0
+
+    async def test_run_from_config_continues_when_docent_upload_fails(self, tmp_path: Path, monkeypatch) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(2)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            docent_log_to_new_collection="",
+        )
+
+        validate_calls = []
+        aggregate_metrics_calls = []
+
+        monkeypatch.setattr(
+            "nemo_gym.rollout_collection.validate_docent_logging_requirements",
+            lambda: validate_calls.append(True),
+        )
+        monkeypatch.setattr(
+            "nemo_gym.docent_utils._initialize_docent_collection_target",
+            lambda **kwargs: DocentCollectionTarget(
+                client=object(),
+                collection_id="existing-collection",
+                collection_name=None,
+                is_new_collection=False,
+            ),
+        )
+        monkeypatch.setattr("nemo_gym.docent_utils._build_docent_agent_run", lambda *, result: result)
+
+        def raise_upload_error(**kwargs):
+            raise RuntimeError("Docent unavailable")
+
+        monkeypatch.setattr("nemo_gym.docent_utils._upload_rollouts_to_docent_collection", raise_upload_error)
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"response": {"usage": {"tokens": 99}}}))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                aggregate_metrics_calls.append((results, rows, output_fpath))
+                return None
+
+        actual_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        assert len(actual_results) == 2
+        assert len(validate_calls) == 1
+        assert len(aggregate_metrics_calls) == 1
 
     async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
