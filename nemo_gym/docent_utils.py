@@ -10,7 +10,6 @@ from typing import Any, Optional
 
 DEFAULT_DOCENT_COLLECTION_PREFIX = "NeMo Gym rollouts"
 DOCENT_DEPENDENCY_ERROR = "Docent logging requires the optional `nemo-gym[docent]` dependency extra."
-DOCENT_AGENT_RUN_DESCRIPTION = "Rollout collected with NeMo Gym."
 DOCENT_COLLECTION_DESCRIPTION = "Rollouts collected with NeMo Gym."
 
 
@@ -72,7 +71,6 @@ def log_rollouts_to_docent(
     uploaded_count = _upload_rollouts_to_docent_collection(
         collection_target=collection_target,
         results=results_to_upload,
-        output_fpath=output_fpath,
     )
     print(f"Uploaded {uploaded_count} rollouts to Docent")
     return uploaded_count
@@ -120,12 +118,11 @@ def _upload_rollouts_to_docent_collection(
     *,
     collection_target: DocentCollectionTarget,
     results: list[dict[str, Any]],
-    output_fpath: Path,
 ) -> int:
     if not results:
         return 0
 
-    agent_runs = [_build_docent_agent_run(result=result, output_fpath=output_fpath) for result in results]
+    agent_runs = [_build_docent_agent_run(result=result) for result in results]
 
     collection_target.client.add_agent_runs(collection_target.collection_id, agent_runs)
     return len(agent_runs)
@@ -163,16 +160,10 @@ def _get_docent_nemogym_rollout_converter() -> Any:
     return convert_nemogym_rollout_to_agent_run
 
 
-def _build_docent_agent_run(*, result: dict[str, Any], output_fpath: Path) -> Any:
+def _build_docent_agent_run(*, result: dict[str, Any]) -> Any:
     convert_nemogym_rollout_to_agent_run = _get_docent_nemogym_rollout_converter()
     normalized_result = _normalize_rollout_for_docent_sdk(result=result)
-    agent_run = convert_nemogym_rollout_to_agent_run(normalized_result)
-    _apply_docent_agent_run_compatibility_patches(
-        agent_run=agent_run,
-        result=result,
-        output_fpath=output_fpath,
-    )
-    return agent_run
+    return convert_nemogym_rollout_to_agent_run(normalized_result)
 
 
 def _normalize_rollout_for_docent_sdk(*, result: dict[str, Any]) -> dict[str, Any]:
@@ -206,80 +197,6 @@ def _normalize_rollout_for_docent_sdk(*, result: dict[str, Any]) -> dict[str, An
     return normalized_result
 
 
-def _apply_docent_agent_run_compatibility_patches(
-    *,
-    agent_run: Any,
-    result: dict[str, Any],
-    output_fpath: Path,
-) -> None:
-    agent_name = ((result.get("agent_ref") or {}).get("name")) or "unknown-agent"
-    task_index = result.get("_ng_task_index")
-    rollout_index = result.get("_ng_rollout_index")
-    response = result.get("response") or {}
-    response_usage = response.get("usage") or {}
-
-    score_metadata = {}
-    if result.get("reward") is not None:
-        score_metadata["reward"] = result["reward"]
-
-    total_tokens = response_usage.get("total_tokens")
-    if isinstance(total_tokens, (int, float)):
-        score_metadata["total_tokens"] = total_tokens
-
-    input_tokens = response_usage.get("input_tokens")
-    if isinstance(input_tokens, (int, float)):
-        score_metadata["input_tokens"] = input_tokens
-
-    output_tokens = response_usage.get("output_tokens")
-    if isinstance(output_tokens, (int, float)):
-        score_metadata["output_tokens"] = output_tokens
-
-    agent_run.name = _build_legacy_docent_agent_run_name(
-        agent_name=agent_name,
-        task_index=task_index,
-        rollout_index=rollout_index,
-    )
-    agent_run.description = DOCENT_AGENT_RUN_DESCRIPTION
-
-    metadata = dict(agent_run.metadata or {})
-    nemo_gym_metadata = dict(metadata.get("nemo_gym") or {})
-    nemo_gym_metadata["agent_name"] = agent_name
-    nemo_gym_metadata["task_index"] = task_index
-    nemo_gym_metadata["rollout_index"] = rollout_index
-    nemo_gym_metadata["output_jsonl_fpath"] = str(output_fpath)
-    nemo_gym_metadata["raw_rollout"] = result
-    if result.get("agent_ref") is not None:
-        nemo_gym_metadata["agent_ref"] = result["agent_ref"]
-    if response.get("model") is not None:
-        nemo_gym_metadata["response_model"] = response["model"]
-    metadata["nemo_gym"] = nemo_gym_metadata
-
-    if score_metadata:
-        scores = dict(metadata.get("scores") or {})
-        scores.update(score_metadata)
-        metadata["scores"] = scores
-    agent_run.metadata = metadata
-
-    if not getattr(agent_run, "transcripts", None):
-        return
-
-    transcript = agent_run.transcripts[0]
-    transcript_metadata = dict(transcript.metadata or {})
-    source_metadata = dict(transcript_metadata.get("source") or {})
-    source_metadata["input_item_count"] = _count_docent_input_items(_get_responses_create_input_payload(result))
-    transcript_metadata["source"] = source_metadata
-    transcript.metadata = transcript_metadata
-
-
-def _build_legacy_docent_agent_run_name(
-    *,
-    agent_name: str,
-    task_index: Any,
-    rollout_index: Any,
-) -> str:
-    return f"{agent_name}/task-{task_index}/rollout-{rollout_index}"
-
-
 def _default_collection_name(output_fpath: Path) -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return f"{DEFAULT_DOCENT_COLLECTION_PREFIX} {output_fpath.stem} {timestamp}"
@@ -288,18 +205,3 @@ def _default_collection_name(output_fpath: Path) -> str:
 def _response_contains_transitions(response: dict[str, Any]) -> bool:
     output_items = response.get("output") or []
     return bool(output_items) and all(isinstance(item, list) for item in output_items)
-
-
-def _get_responses_create_input_payload(result: dict[str, Any]) -> Any:
-    responses_create_params = result.get("responses_create_params")
-    if not isinstance(responses_create_params, dict):
-        return None
-    return responses_create_params.get("input")
-
-
-def _count_docent_input_items(input_payload: Any) -> int:
-    if input_payload is None:
-        return 0
-    if isinstance(input_payload, list):
-        return len(input_payload)
-    return 1

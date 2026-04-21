@@ -429,7 +429,7 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
-    def test_build_docent_agent_run_with_transitions(self, tmp_path: Path) -> None:
+    def test_build_docent_agent_run_with_transitions(self) -> None:
         result = {
             "_ng_task_index": 3,
             "_ng_rollout_index": 2,
@@ -474,10 +474,10 @@ class TestRolloutCollection:
             "reward": 1.0,
         }
 
-        agent_run = _build_docent_agent_run(result=result, output_fpath=tmp_path / "rollouts.jsonl")
+        agent_run = _build_docent_agent_run(result=result)
 
-        assert agent_run.name == "my_agent/task-3/rollout-2"
-        assert agent_run.description == "Rollout collected with NeMo Gym."
+        assert agent_run.name == "my_agent/task/3/rollout/2"
+        assert agent_run.description is None
         assert len(agent_run.transcripts) == 1
 
         messages = agent_run.transcripts[0].messages
@@ -493,17 +493,14 @@ class TestRolloutCollection:
         assert messages[2].text == "4"
         assert messages[3].text == "The answer is 4."
 
-        assert agent_run.metadata["scores"] == {
-            "reward": 1.0,
-            "total_tokens": 30,
-            "input_tokens": 10,
-            "output_tokens": 20,
+        assert agent_run.metadata["scores"] == {"reward": 1.0}
+        assert agent_run.metadata["nemogym"] == {
+            "task_index": 3,
+            "rollout_index": 2,
+            "agent_ref": {"name": "my_agent"},
         }
-        assert agent_run.metadata["nemo_gym"]["agent_name"] == "my_agent"
-        assert agent_run.metadata["nemo_gym"]["response_model"] == "test-model"
-        assert agent_run.metadata["nemo_gym"]["output_jsonl_fpath"] == str(tmp_path / "rollouts.jsonl")
-        assert agent_run.metadata["nemo_gym"]["raw_rollout"] == result
-        assert agent_run.transcripts[0].metadata["source"]["input_item_count"] == 1
+        assert agent_run.transcripts[0].metadata["source"]["response_model"] == "test-model"
+        assert agent_run.transcripts[0].metadata["source"]["input_item_count"] == 0
 
     async def test_run_from_config_docent_requires_api_key(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.delenv("DOCENT_API_KEY", raising=False)
